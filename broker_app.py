@@ -149,7 +149,11 @@ async def tcp_to_ws(reader: asyncio.StreamReader, ws: WebSocket):
     except Exception as e:
         print(f"⚠️ TCP->WS Error: {e}")
 
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
 
+    
 @app.websocket("/mqtt")
 async def mqtt_websocket_proxy_opt(client_ws: WebSocket):
     

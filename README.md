@@ -10,3 +10,7 @@ short_description: mqtt-broker
 ---
 
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+
+
+### Reference
+- https://discuss.huggingface.co/t/hf-space-stuck-at-starting/170911/2
