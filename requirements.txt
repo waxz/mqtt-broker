@@ -1,0 +1,26 @@
+fastapi
+uvicorn
+uvloop
+websockets
+
+gmqtt
+google-genai
+python-dotenv
+jinja2
+PersistDict
+python-multipart
+python-jose[cryptography]
+# passlib
+sqlalchemy
+# opencv-python
+paho-mqtt
+cython
+setuptools
+
+sqlitedict
+concurrent_collections
+
+# mqtt
+# iotcore
+# for pyo3
+maturin
