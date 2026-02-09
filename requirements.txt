@@ -3,6 +3,8 @@ uvicorn
 uvloop
 websockets
 
+numpy
+
 gmqtt
 google-genai
 python-dotenv
