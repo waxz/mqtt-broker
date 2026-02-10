@@ -105,6 +105,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+
 async def ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter):
     pending_bytes = 0
     # Increase from 128KB to 512KB for Localhost testing
@@ -149,11 +153,7 @@ async def tcp_to_ws(reader: asyncio.StreamReader, ws: WebSocket):
     except Exception as e:
         print(f"⚠️ TCP->WS Error: {e}")
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
 
-    
 @app.websocket("/mqtt")
 async def mqtt_websocket_proxy_opt(client_ws: WebSocket):
     
@@ -333,7 +333,7 @@ class UnsubscribeBody(BaseModel):
 
 class PollBody(BaseModel):
     topic: str | None = None            # None → all topics
-    limit: int = Field(default=50, ge=1, le=500)
+    limit: int = 500
 
 
 # --------------------------------------------------------------------------- #

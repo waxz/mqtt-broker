@@ -11,7 +11,7 @@ if __name__ == "__main__":
     # ws_ping_timeout=None   -> Disables waiting for Pongs (Prevents timeouts)
     uvicorn.run(
         "broker_app:app", 
-        host="0.0.0.0", 
+        host="0.0.0.0",
         port=7860, 
         loop="uvloop",
         ws_ping_interval=None, 
