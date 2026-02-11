@@ -4,6 +4,7 @@ import socket
 import base64
 from pydantic import BaseModel, Field
 import os
+import urllib.parse
 # 1. IMPORT THE COMPILED CYTHON MODULE
 try:
     from proxy_core import optimized_ws_to_tcp, optimized_tcp_to_ws
@@ -400,7 +401,7 @@ async def connect_client(body: ConnectBody):
         print("Invalid API Key")
         raise HTTPException(status_code=401, detail="Invalid API Key")
     
-    client_id = str(base64.b64encode(f'{body.brokerUsername}:{body.brokerPassword}'.encode('ascii')))
+    client_id = urllib.parse.quote_plus(base64.b64encode(f'{body.brokerUsername}:{body.brokerPassword}'.encode('ascii')))
     stamp = datetime.now()
     if client_id not in CONNECTION_CLIENTS:
         CONNECTION_CLIENTS.assign_atomic(client_id, {
@@ -490,6 +491,7 @@ async def subscribe(client_id: str, body: SubscribeBody):
         topic,
         lambda msg, _cid=client_id, _t=topic: _mqtt_callback(_cid, _t, msg),
     )
+    print(f"ℹ️ Subscribe {body}")
     return {"success": True, "topic": topic, "stream": body.stream}
 
 
@@ -525,6 +527,7 @@ async def get_messages(client_id: str, body: PollBody):
       → returns a **JSON array** of drained messages (classic poll).
     """
     _require_client(client_id)
+    print(f"ℹ️ Poll {body}")
 
     # ── decide mode from the flag set at subscribe time ──
     if body.topic and _is_stream_mode(client_id, body.topic):
@@ -537,10 +540,12 @@ async def get_messages(client_id: str, body: PollBody):
 def _poll_response(client_id: str, topic: str | None, limit: int):
     collected: list[dict] = []
 
+    print(f"ℹ️ _poll_response client_id:{client_id},topic:{topic}")
 
     with CONNECTION_CLIENTS.get_locked(client_id) as v:
         messages = v.get("messages", {})
         topics = [topic] if topic else list(messages)
+        print(f"ℹ️ _poll_response client_id:{client_id},topics:{topics},messages:{messages}")
 
         for t in topics:
             store = messages.get(t)
@@ -554,6 +559,7 @@ def _poll_response(client_id: str, topic: str | None, limit: int):
                 continue
             collected.extend(queue[:take])
             del queue[:take]
+    print(f"ℹ️ _poll_response client_id:{client_id},collected:{collected}")
 
     return {
         "success":  True,
