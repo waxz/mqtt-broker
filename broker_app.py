@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime
 import socket
+import base64
 from pydantic import BaseModel, Field
 import os
 # 1. IMPORT THE COMPILED CYTHON MODULE
@@ -308,8 +309,11 @@ import uuid, asyncio, json
 # --------------------------------------------------------------------------- #
 class ConnectBody(BaseModel):
     brokerUrl: str | None = f"mqtt://{BROKER_HOST}:{BROKER_PORT}"
-    username: str | None = None
+    brokerUsername: str | None = "demo"
+    brokerPassword: str | None = "demo"
     password: str | None = None
+    password: str | None = None
+
     keepalive: int = 60
     apiKey: str | None = None
 
@@ -333,7 +337,7 @@ class UnsubscribeBody(BaseModel):
 
 class PollBody(BaseModel):
     topic: str | None = None            # None → all topics
-    limit: int = 500
+    limit: int = 50
 
 
 # --------------------------------------------------------------------------- #
@@ -395,16 +399,16 @@ async def connect_client(body: ConnectBody):
     if body.apiKey != BROKER_APIKEY:
         print("Invalid API Key")
         raise HTTPException(status_code=401, detail="Invalid API Key")
-
-    client_id = str(uuid.uuid4())
+    
+    client_id = str(base64.b64encode(f'{body.brokerUsername}:{body.brokerPassword}'.encode('ascii')))
     stamp = datetime.now()
-
-    CONNECTION_CLIENTS.assign_atomic(client_id, {
-        "created_at":   stamp,
-        "ping_at":      stamp,
-        "ping_timeout": 0,
-        "messages":     {},
-    })
+    if client_id not in CONNECTION_CLIENTS:
+        CONNECTION_CLIENTS.assign_atomic(client_id, {
+            "created_at":   stamp,
+            "ping_at":      stamp,
+            "ping_timeout": 0,
+            "messages":     {},
+        })
 
     return {
         "success":    True,
@@ -523,7 +527,7 @@ async def get_messages(client_id: str, body: PollBody):
     _require_client(client_id)
 
     # ── decide mode from the flag set at subscribe time ──
-    if _is_stream_mode(client_id, body.topic):
+    if body.topic and _is_stream_mode(client_id, body.topic):
         return _stream_response(client_id, body.topic)
     else:
         return _poll_response(client_id, body.topic, body.limit)
