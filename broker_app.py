@@ -540,12 +540,10 @@ async def get_messages(client_id: str, body: PollBody):
 def _poll_response(client_id: str, topic: str | None, limit: int):
     collected: list[dict] = []
 
-    print(f"ℹ️ _poll_response client_id:{client_id},topic:{topic}")
 
     with CONNECTION_CLIENTS.get_locked(client_id) as v:
         messages = v.get("messages", {})
         topics = [topic] if topic else list(messages)
-        print(f"ℹ️ _poll_response client_id:{client_id},topics:{topics},messages:{messages}")
 
         for t in topics:
             store = messages.get(t)
@@ -559,13 +557,14 @@ def _poll_response(client_id: str, topic: str | None, limit: int):
                 continue
             collected.extend(queue[:take])
             del queue[:take]
-    print(f"ℹ️ _poll_response client_id:{client_id},collected:{collected}")
+    stamp = datetime.now()
 
     return {
         "success":  True,
         "mode":     "poll",
         "count":    len(collected),
         "messages": collected,
+        "stamp": stamp.isoformat()
     }
 
 
