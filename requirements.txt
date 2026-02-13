@@ -26,3 +26,7 @@ concurrent_collections
 # iotcore
 # for pyo3
 maturin
+orjson
+sse-starlette
+starlette
+requests_sse 

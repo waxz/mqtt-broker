@@ -16,5 +16,5 @@ if __name__ == "__main__":
         loop="uvloop",
         ws_ping_interval=None, 
         ws_ping_timeout=None,
-        log_level="critical" #info, critical
+        log_level="info" #info, critical
     )
