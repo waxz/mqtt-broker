@@ -233,18 +233,19 @@ class TopicStore:
         self._notify                = asyncio.Event()   # per-topic wakeup
         self._overflow_count: int   = 0
 
-    # ── called from MQTT thread ──────────────────────────────────── #
+    # In TopicStore.push — see what goes IN
     def push(self, envelope: dict):
         """
         Append one message. Thread-safe.
         """
-        envelope["_ts"] = time.time()  # Internal high-res timestamp for TTL
+        envelope["_ts"] = time.time()
         with self._lock:
             if len(self._buffer) == self._buffer.maxlen:
                 self._overflow_count += 1
             self._buffer.append(envelope)
+            log.warning("PUSH topic=%s  buffer_len=%d", self.topic, len(self._buffer))  # ← ADD
 
-    # ── called from async-loop thread ────────────────────────────── #
+    # In TopicStore.drain — see what comes OUT
     def drain(self, limit: int) -> list:
         """
         Atomically remove up to *limit* messages and return them.
@@ -259,8 +260,10 @@ class TopicStore:
                 self._buffer.clear()
             else:
                 result = [self._buffer.popleft() for _ in range(take)]
+            log.warning("DRAIN topic=%s  took=%d  remaining=%d", self.topic, len(result), len(self._buffer))  # ← ADD
             return result
 
+    # ── called from MQTT thread ──────────────────────────────────── #
     def cleanup(self, ttl: int):
         """
         Remove messages older than TTL.
@@ -435,6 +438,9 @@ def _mqtt_on_message(client_id: str, topic: str, msg):
     """
     Called from IotCore's background thread for EVERY message.
     """
+    log.warning("MQTT-CB  client=%s  topic=%s  payload=%.60s",
+                client_id, topic, str(msg)[:60])  # ← ADD
+
     client = _clients.get(client_id)
     if client is None:
         return
@@ -707,6 +713,10 @@ async def sse_event_generator(request: Request, client: ClientState):
             messages = client.drain_messages(limit=SSE_DRAIN_LIMIT)
 
             if messages:
+                log.warning("SSE-YIELD  client=%s  count=%d  first_ts=%s",
+                client.client_id, len(messages),
+                messages[0].get("timestamp","?"))  # ← ADD
+
                 yield {
                     "event": "messages",
                     "data":  fast_json_dumps(messages),
@@ -726,7 +736,26 @@ async def sse_event_generator(request: Request, client: ClientState):
     except (asyncio.CancelledError, GeneratorExit):
         return
 
+@app.get("/clients/{client_id}/messages")
+async def message_stream_get(client_id: str, request: Request):
+    """
+    GET SSE endpoint — works with native EventSource API.
+    """
+    client = await _get_client(client_id)
+    client.last_ping = datetime.now()
 
+    if client._event_loop is None:
+        client.bind_loop(asyncio.get_running_loop())
+
+    return EventSourceResponse(
+        sse_event_generator(request, client),
+        headers={
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection":        "keep-alive",
+        },
+    )
+    
 @app.post("/clients/{client_id}/messages")
 async def message_stream(client_id: str, request: Request):
     """
