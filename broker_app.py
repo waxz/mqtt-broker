@@ -449,32 +449,127 @@ def _mqtt_on_message(client_id: str, topic: str, msg):
 
 
 # ========================================================================== #
+# NEW: Topic Fan-Out Multiplexer
+# ========================================================================== #
+
+class TopicMultiplexer:
+    """
+    Maintains one IotCore subscription per topic and fans messages
+    out to all HTTP clients subscribed to that topic.
+    """
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        # topic → set of client_ids
+        self._topic_clients: dict[str, set[str]] = {}
+
+    async def subscribe(self, client_id: str, topic: str, qos: int = 0):
+        """
+        Register a client for a topic. Only subscribes to IotCore
+        on the FIRST client for each topic.
+        """
+        async with self._lock:
+            if topic in self._topic_clients:
+                # Topic already subscribed in IotCore — just add client
+                self._topic_clients[topic].add(client_id)
+                log.info("Fan-out: client %s joined topic %s (%d clients)",
+                         client_id, topic, len(self._topic_clients[topic]))
+                return
+
+            # First client for this topic — subscribe to IotCore
+            self._topic_clients[topic] = {client_id}
+
+        # Subscribe OUTSIDE the lock to avoid holding it during I/O
+        await _iot_subscribe(
+            topic,
+            lambda msg, _t=topic: self._fanout(_t, msg),
+            qos=qos,
+        )
+        log.info("Fan-out: subscribed to IotCore topic %s (first client: %s)",
+                 topic, client_id)
+
+    async def unsubscribe(self, client_id: str, topic: str):
+        """
+        Remove a client from a topic. Only unsubscribes from IotCore
+        when the LAST client leaves.
+        """
+        should_unsub = False
+        async with self._lock:
+            clients = self._topic_clients.get(topic)
+            if clients is None:
+                return
+            clients.discard(client_id)
+            if not clients:
+                del self._topic_clients[topic]
+                should_unsub = True
+                log.info("Fan-out: last client left topic %s — unsubscribing",
+                         topic)
+            else:
+                log.info("Fan-out: client %s left topic %s (%d remain)",
+                         client_id, topic, len(clients))
+
+        if should_unsub:
+            try:
+                await _iot_unsubscribe(topic)
+            except Exception as e:
+                log.error("Fan-out: unsubscribe error for %s: %s", topic, e)
+
+    async def unsubscribe_all(self, client_id: str, topics: Iterable[str]):
+        """Remove a client from all its topics (used on disconnect/reap)."""
+        for topic in list(topics):
+            await self.unsubscribe(client_id, topic)
+
+    def _fanout(self, topic: str, msg):
+        """
+        Called from IotCore's MQTT thread.
+        Delivers to EVERY client subscribed to this topic.
+        """
+        # Read _topic_clients without lock — dict.get is GIL-atomic
+        clients = self._topic_clients.get(topic)
+        if not clients:
+            return
+
+        record_message_in(len(msg) if isinstance(msg, (str, bytes)) else 0)
+
+        # Fan out to each client
+        for cid in clients:                  # iterating a set — snapshot isn't needed
+            client = _clients.get(cid)       # under CPython GIL
+            if client is not None:
+                client.on_message(topic, msg)
+
+    def get_topic_clients(self, topic: str) -> set[str]:
+        """Inspect which clients are on a topic (for debugging)."""
+        return self._topic_clients.get(topic, set()).copy()
+
+    def get_all_topics(self) -> dict[str, int]:
+        """Return {topic: client_count} for status/debug."""
+        return {t: len(c) for t, c in self._topic_clients.items()}
+
+
+# Global instance
+_mux = TopicMultiplexer()
+
+# ========================================================================== #
 # Background reaper
 # ========================================================================== #
 async def _reaper():
     while True:
         await asyncio.sleep(REAPER_INTERVAL)
-        
-        # 1. Clean up expired messages for ALL clients
+
         for client in list(_clients.values()):
             try:
                 client.cleanup(MSG_TTL)
             except Exception as e:
                 log.error("Error during client message cleanup: %s", e)
 
-        # 2. Reap stale clients
         stale = [cid for cid, c in _clients.items()
                  if c.age_seconds > STALE_SECONDS]
         for cid in stale:
             log.info("Reaping stale client %s", cid)
             client = _clients.pop(cid, None)
             if client:
-                for t in list(client.topics):
-                    try:
-                        iot.unsubscribe(t)
-                    except Exception:
-                        pass
-
+                # ── USE MULTIPLEXER ──
+                await _mux.unsubscribe_all(cid, client.topics.keys())
 
 # ========================================================================== #
 # Lifespan
@@ -624,20 +719,16 @@ async def disconnect_client(client_id: str):
     async with _clients_lock:
         client = _clients.pop(client_id, None)
     if client:
-        for topic in list(client.topics):
-            try:
-                await _iot_unsubscribe(topic)
-            except Exception:
-                pass
+        # ── USE MULTIPLEXER — only unsubscribes from IotCore
+        #    if this was the LAST client on each topic ──
+        await _mux.unsubscribe_all(client_id, client.topics.keys())
     return {"success": True}
-
 
 # ── Subscribe ───────────────────────────────────────────────────────────── #
 @app.post("/clients/{client_id}/subscribe")
 async def subscribe(client_id: str, body: SubscribeBody):
     client = await _get_client(client_id)
 
-    # Ensure event-loop is bound (idempotent)
     if client._event_loop is None:
         client.bind_loop(asyncio.get_running_loop())
 
@@ -645,17 +736,12 @@ async def subscribe(client_id: str, body: SubscribeBody):
         if body.topic in client.topics:
             return {"success": True, "topic": body.topic,
                     "note": "already subscribed"}
-        client.topics[body.topic] = TopicStore(
-            body.topic, qos=body.qos)
+        client.topics[body.topic] = TopicStore(body.topic, qos=body.qos)
 
-    await _iot_subscribe(
-        body.topic,
-        lambda msg, _c=client_id, _t=body.topic:
-            _mqtt_on_message(_c, _t, msg),
-        qos=body.qos,
-    )
+    # ── USE MULTIPLEXER instead of direct iot.subscribe ──
+    await _mux.subscribe(client_id, body.topic, qos=body.qos)
+
     return {"success": True, "topic": body.topic}
-
 
 # ── Unsubscribe ─────────────────────────────────────────────────────────── #
 @app.post("/clients/{client_id}/unsubscribe")
@@ -666,9 +752,11 @@ async def unsubscribe(client_id: str, body: UnsubscribeBody):
             raise HTTPException(status_code=404,
                                 detail=f"Not subscribed to '{body.topic}'")
         del client.topics[body.topic]
-    await _iot_unsubscribe(body.topic)
-    return {"success": True}
 
+    # ── USE MULTIPLEXER ──
+    await _mux.unsubscribe(client_id, body.topic)
+
+    return {"success": True}
 
 # ── Publish (single) ────────────────────────────────────────────────────── #
 @app.post("/clients/{client_id}/publish")
