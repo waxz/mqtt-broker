@@ -11,10 +11,10 @@ WORKDIR /app
 
 # cache requirements.txt
 COPY --chown=user ./requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
 RUN curl -L "https://github.com/waxz/iotcore/releases/download/v3.0.4/iotcore-3.0.4-cp312-cp312-manylinux_2_38_x86_64.whl" -o /app/iotcore-3.0.4-cp312-cp312-manylinux_2_38_x86_64.whl
-RUN pip install /app/iotcore-3.0.4-cp312-cp312-manylinux_2_38_x86_64.whl
+# RUN pip install /app/iotcore-3.0.4-cp312-cp312-manylinux_2_38_x86_64.whl
+RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
 COPY --chown=user . /app
 

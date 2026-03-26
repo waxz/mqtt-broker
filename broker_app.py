@@ -19,15 +19,13 @@ import base64
 import json
 import os
 import socket
-import threading                       # ← NEW: for TopicStore lock
-import requests
+import threading
+import urllib.parse
 from typing import Iterable
 import time
 from pathlib import Path
 from sse_starlette.sse import EventSourceResponse
-from starlette.responses import FileResponse
 import logging
-import urllib.parse
 import concurrent.futures
 from collections import deque
 from contextlib import asynccontextmanager
@@ -35,12 +33,17 @@ from datetime import datetime
 
 from functools import partial
 
-from fastapi import FastAPI, Request
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel, Field
-from fastapi.responses import HTMLResponse
+
+try:
+    from starlette.middleware.gzip import GZipMiddleware as GZipMiddlewareImpl
+    _GZIP = True
+except ImportError:
+    GZipMiddlewareImpl = None
+    _GZIP = False
 
 
 RETRY_TIMEOUT = 15000  # millisecond
@@ -202,7 +205,7 @@ STALE_SECONDS    = int(os.environ.get("STALE_SECONDS", "300"))
 MSG_TTL          = int(os.environ.get("MSG_TTL", "300"))      # Messages expire after 5 mins
 
 SSE_HEARTBEAT_SEC = 15.0   # SSE keepalive interval
-SSE_DRAIN_LIMIT   = 500    # max messages per SSE drain cycle
+SSE_DRAIN_LIMIT   = 1000   # max messages per SSE drain cycle
 
 LOG_LEVEL = os.environ.get("BROKER_LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.WARNING),
@@ -243,7 +246,6 @@ class TopicStore:
             if len(self._buffer) == self._buffer.maxlen:
                 self._overflow_count += 1
             self._buffer.append(envelope)
-            log.warning("PUSH topic=%s  buffer_len=%d", self.topic, len(self._buffer))  # ← ADD
 
     # In TopicStore.drain — see what comes OUT
     def drain(self, limit: int) -> list:
@@ -260,7 +262,6 @@ class TopicStore:
                 self._buffer.clear()
             else:
                 result = [self._buffer.popleft() for _ in range(take)]
-            log.warning("DRAIN topic=%s  took=%d  remaining=%d", self.topic, len(result), len(self._buffer))  # ← ADD
             return result
 
     # ── called from MQTT thread ──────────────────────────────────── #
@@ -312,9 +313,8 @@ class ClientState:
     def on_message(self, topic: str, payload):
         """
         Receive a message from the MQTT callback thread.
-        Optimized with Cython and reduced notification overhead.
         """
-        store = self.topics.get(topic)      # dict.get is GIL-atomic
+        store = self.topics.get(topic)
         if store is None:
             return
 
@@ -323,17 +323,10 @@ class ClientState:
 
         loop = self._event_loop
         if loop is not None and not loop.is_closed():
-            # Only schedule .set() if the event is not already set.
-            if not self._notify.is_set():
-                try:
-                    loop.call_soon_threadsafe(self._notify.set)
-                except RuntimeError:
-                    pass
-            if not store._notify.is_set():
-                try:
-                    loop.call_soon_threadsafe(store._notify.set)
-                except RuntimeError:
-                    pass
+            try:
+                loop.call_soon_threadsafe(self._notify.set)
+            except RuntimeError:
+                pass
 
     # ── called from async-loop thread ONLY ───────────────────────── #
     def drain_messages(self, topic: str | None = None,
@@ -438,9 +431,6 @@ def _mqtt_on_message(client_id: str, topic: str, msg):
     """
     Called from IotCore's background thread for EVERY message.
     """
-    log.warning("MQTT-CB  client=%s  topic=%s  payload=%.60s",
-                client_id, topic, str(msg)[:60])  # ← ADD
-
     client = _clients.get(client_id)
     if client is None:
         return
@@ -451,7 +441,6 @@ def _mqtt_on_message(client_id: str, topic: str, msg):
 # ========================================================================== #
 # NEW: Topic Fan-Out Multiplexer
 # ========================================================================== #
-
 class TopicMultiplexer:
     """
     Maintains one IotCore subscription per topic and fans messages
@@ -460,7 +449,6 @@ class TopicMultiplexer:
 
     def __init__(self):
         self._lock = asyncio.Lock()
-        # topic → set of client_ids
         self._topic_clients: dict[str, set[str]] = {}
 
     async def subscribe(self, client_id: str, topic: str, qos: int = 0):
@@ -470,16 +458,13 @@ class TopicMultiplexer:
         """
         async with self._lock:
             if topic in self._topic_clients:
-                # Topic already subscribed in IotCore — just add client
                 self._topic_clients[topic].add(client_id)
                 log.info("Fan-out: client %s joined topic %s (%d clients)",
                          client_id, topic, len(self._topic_clients[topic]))
                 return
 
-            # First client for this topic — subscribe to IotCore
             self._topic_clients[topic] = {client_id}
 
-        # Subscribe OUTSIDE the lock to avoid holding it during I/O
         await _iot_subscribe(
             topic,
             lambda msg, _t=topic: self._fanout(_t, msg),
@@ -524,16 +509,14 @@ class TopicMultiplexer:
         Called from IotCore's MQTT thread.
         Delivers to EVERY client subscribed to this topic.
         """
-        # Read _topic_clients without lock — dict.get is GIL-atomic
         clients = self._topic_clients.get(topic)
         if not clients:
             return
 
         record_message_in(len(msg) if isinstance(msg, (str, bytes)) else 0)
 
-        # Fan out to each client
-        for cid in clients:                  # iterating a set — snapshot isn't needed
-            client = _clients.get(cid)       # under CPython GIL
+        for cid in clients:
+            client = _clients.get(cid)
             if client is not None:
                 client.on_message(topic, msg)
 
@@ -601,6 +584,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
+
+if _GZIP and GZipMiddlewareImpl:
+    app.add_middleware(GZipMiddlewareImpl, minimum_size=256)
 
 
 # ========================================================================== #
@@ -778,9 +764,76 @@ async def publish_get(client_id: str, topic: str, payload: str, qos: int = 0, re
 async def publish_batch(client_id: str, body: BatchPublishBody):
     await _get_client(client_id)
     args = prepare_batch_args(body.messages)
-    tasks = [_iot_publish(t, p, qos=q, retain=r) for t, p, q, r in args]
-    await asyncio.gather(*tasks)
-    return {"success": True, "published": len(args)}
+    for t, p, q, r in args:
+        asyncio.get_event_loop().call_soon_threadsafe(
+            iot.publish, t, p)
+    count = len(args)
+    record_message_out(sum(len(p) if isinstance(p, (str, bytes)) else 0 for _, p, _, _ in args))
+    return {"success": True, "published": count}
+
+
+@app.post("/clients/{client_id}/publish/fire")
+async def publish_fire(client_id: str, body: BatchPublishBody):
+    """
+    Fire-and-forget batch publish. No acknowledgment, fastest path.
+    Messages queued immediately to IotCore without awaiting.
+    """
+    await _get_client(client_id)
+    args = prepare_batch_args(body.messages)
+    loop = asyncio.get_event_loop()
+    for t, p, q, r in args:
+        loop.call_soon_threadsafe(iot.publish, t, p)
+    record_message_out(sum(len(p) if isinstance(p, (str, bytes)) else 0 for _, p, _, _ in args))
+    return {"success": True, "queued": len(args)}
+
+
+@app.post("/clients/{client_id}/messages/stream")
+async def message_stream_ndjson(client_id: str, request: Request):
+    """
+    High-efficiency NDJSON stream endpoint.
+    Each line is a JSON array of messages.
+    No SSE overhead, better for high-throughput scenarios.
+    """
+    client = await _get_client(client_id)
+    client.last_ping = datetime.now()
+
+    if client._event_loop is None:
+        client.bind_loop(asyncio.get_running_loop())
+
+    async def ndjson_generator():
+        try:
+            while True:
+                if _clients.get(client.client_id) is None:
+                    return
+
+                client.last_ping = datetime.now()
+                messages = client.drain_messages(limit=SSE_DRAIN_LIMIT)
+
+                if messages:
+                    line = fast_json_dumps(messages)
+                    if isinstance(line, bytes):
+                        line = line.decode('utf-8')
+                    yield line + "\n"
+                    continue
+
+                got_data = await client.wait_for_messages(SSE_HEARTBEAT_SEC)
+                if not got_data:
+                    if await request.is_disconnected():
+                        return
+                    yield ":" + "\n"
+
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+
+    return StreamingResponse(
+        ndjson_generator(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control":     "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection":        "keep-alive",
+        },
+    )
 
 
 # ========================================================================== #
@@ -788,6 +841,7 @@ async def publish_batch(client_id: str, body: BatchPublishBody):
 # ========================================================================== #
 
 async def sse_event_generator(request: Request, client: ClientState):
+    messages: list = []
     try:
         while True:
             # Exit if client was disconnected / reaped
@@ -801,15 +855,10 @@ async def sse_event_generator(request: Request, client: ClientState):
             messages = client.drain_messages(limit=SSE_DRAIN_LIMIT)
 
             if messages:
-                log.warning("SSE-YIELD  client=%s  count=%d  first_ts=%s",
-                client.client_id, len(messages),
-                messages[0].get("timestamp","?"))  # ← ADD
-
                 yield {
                     "event": "messages",
                     "data":  fast_json_dumps(messages),
                 }
-                await asyncio.sleep(0)
                 continue
 
             # ── nothing to send — wait for signal or heartbeat ── #
@@ -838,9 +887,10 @@ async def message_stream_get(client_id: str, request: Request):
     return EventSourceResponse(
         sse_event_generator(request, client),
         headers={
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
+            "Cache-Control":      "no-cache, no-transform",
+            "X-Accel-Buffering":  "no",
+            "Connection":          "keep-alive",
+            "Transfer-Encoding":   "chunked",
         },
     )
     
@@ -859,9 +909,10 @@ async def message_stream(client_id: str, request: Request):
     return EventSourceResponse(
         sse_event_generator(request, client),
         headers={
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
+            "Cache-Control":      "no-cache, no-transform",
+            "X-Accel-Buffering":  "no",
+            "Connection":         "keep-alive",
+            "Transfer-Encoding":  "chunked",
         },
     )
 
@@ -966,6 +1017,40 @@ async def ws_mqtt(ws: WebSocket):
 @app.websocket("/mqtt_normal")
 async def ws_mqtt_normal(ws: WebSocket):
     await _proxy_ws(ws)
+
+
+# ========================================================================== #
+# Direct WebSocket-to-MQTT Proxy (Zero-Processing Forward)
+# ========================================================================== #
+async def _proxy_ws_direct(client_ws: WebSocket):
+    try:
+        reader, writer = await asyncio.open_connection(
+            BROKER_HOST, BROKER_PORT)
+        sock = writer.get_extra_info('socket')
+        if sock:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception as e:
+        log.error("Internal Broker Down: %s", e)
+        await client_ws.close(code=1011)
+        return
+
+    await client_ws.accept()
+
+    task_ws  = asyncio.create_task(optimized_ws_to_tcp(client_ws, writer))
+    task_tcp = asyncio.create_task(optimized_tcp_to_ws(reader, client_ws))
+
+    await asyncio.wait([task_ws, task_tcp],
+                       return_when=asyncio.FIRST_COMPLETED)
+
+    for task in [task_ws, task_tcp]:
+        task.cancel()
+
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:
+        pass
+
 
 
 BRIDGE_HTML = Path('bridge.html').read_text()

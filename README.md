@@ -6,54 +6,205 @@ colorTo: blue
 sdk: docker
 pinned: false
 license: mit
-short_description: A high-concurrency, low-latency MQTT-HTTP bridge.
+short_description: A high-concurrency, low-latency MQTT-HTTP bridge with WebSocket support.
 ---
 
 # High-Performance MQTT HTTP Bridge
 
-This project provides a robust, high-speed conduit between the industrial MQTT world and the modern Web. Optimized for single-core efficiency and massive throughput, it enables seamless IoT data integration via HTTP, SSE, and WebSockets.
+A robust, high-speed conduit between industrial MQTT and the modern Web. Achieves ~70,000+ msg/s MQTT throughput with Cython optimizations and supports HTTP, SSE, WebSocket, and NDJSON streaming.
 
-## 🚀 Performance & Reliability
-On a single-core Intel(R) Xeon(R) CPU @ 2.20GHz, this bridge has achieved:
-- **Throughput:** ~2,300 msg/s (HTTP-to-MQTT with SSE delivery).
-- **Reliability:** 100% message delivery and 0% out-of-order delivery across all QoS levels.
-- **Latency:** Average HTTP bridge latency of ~15ms (including SSE batching).
+## 🚀 Performance
 
-## 🛠 Design Principles (The Zen of the Bridge)
-The architecture is guided by five core engineering mandates:
-1. **Zero-Latency Mindset:** Hot-paths are optimized using **Cython** and **orjson** to eliminate Python interpreter overhead.
-2. **Data Flow as Fluid Dynamics:** IO pressure is managed via **Batching** at every layer—from SSE event streams to bulk HTTP publishing.
-3. **Non-Blocking Harmony:** Threaded MQTT callbacks and the Async loop communicate via quiet, lock-protected reservoirs to prevent "notification storms."
-4. **Deterministic Reliability:** A **Handshake-First** lifecycle ensures client state is perfectly synchronized before data flows.
-5. **Session Isolation & Safety:** Unique session IDs by default prevent cross-tab collisions, while a **dual-layered memory defense** (TTL + Buffer Cap) prevents memory exhaustion.
+### Localhost (Verified 2026-03-26)
+| Protocol | Send Throughput | Recv Throughput | Latency |
+|----------|-----------------|-----------------|---------|
+| MQTT (TCP) | ~70,000 msg/s | ~800 msg/s | ~1.5ms |
+| MQTT (WebSocket) | ~65,000 msg/s | ~800 msg/s | ~1.7ms |
+| HTTP (SSE/NDJSON) | ~10,000 msg/s | ~5,000 msg/s | ~8ms |
+| WebSocket API | ~15,000 msg/s | ~20-60 msg/s | ~8ms |
 
-## 📦 Build & Run
+### Cloudflare/HuggingFace Space (Remote)
+| Environment | Latency | Throughput |
+|-------------|---------|------------|
+| Cloudflare HTTP | ~43ms | ~1,000 msg/s |
+| HuggingFace Space | ~100ms | ~500 msg/s |
 
-### Dependency
-- **iotcore:** High-performance MQTT core (Rust-based). [Source](https://github.com/waxz/iotcore)
+**Note:** MQTT requires direct TCP access (port 1883) - not available over Cloudflare tunnels. Use WebSocket/MQTT or HTTP API instead.
 
-### Build Extensions
+## 🎯 Features
+
+- **MQTT Broker** - Built-in high-performance MQTT broker (iotcore/Rust)
+- **HTTP REST API** - Full CRUD operations for clients, topics, and messages
+- **Server-Sent Events (SSE)** - Real-time message streaming with automatic batching
+- **NDJSON Streaming** - Newline-delimited JSON for lower overhead than SSE
+- **WebSocket** - Bidirectional communication for both MQTT proxy and HTTP API clients
+- **Fire-and-Forget Publish** - Fastest publish mode via `/publish/fire`
+- **GZip Compression** - Automatic compression for responses >256 bytes
+- **Cython Optimizations** - Hot paths use orjson and compiled extensions
+
+## 📦 Quick Start
+
+### Install Dependencies
 ```bash
-python pyx/setup.py build_ext -b ./
+pip install -r requirements.txt
 ```
 
-### Run Server
+### Build Cython Extensions (Optional but Recommended)
 ```bash
-python run_broker.py > /dev/null 2>&1
-```
-### Run benchmark
-```bash
-python ./run_broker.py > broker.log 2>&1 & pid=$!; for i in {1..20}; do grep -q "Uvicorn running" broker.log && echo "Broker ready" && break; sleep 1; done; python ./benchmark.py --test all; kill $pid
+python pyx/setup.py build_ext --inplace
 ```
 
-## 🗺 Roadmap (Phase 3)
-- **Modern Web Client:** Production-ready `MqttSseClient` with WebWorker offloading support.
-- **Multi-Process Pipelining:** Splitting the Rust MQTT loop and the FastAPI server into separate processes to fully bypass the GIL.
-- **Rust Core Migration:** Porting internal state management into a dedicated Rust extension for near-native performance.
+### Run Broker
+```bash
+python run_broker.py
+```
 
----
-### Reference
-- https://huggingface.co/docs/hub/spaces-config-reference
-- https://discuss.huggingface.co/t/hf-space-stuck-at-starting/170911/2
-- https://stackoverflow.com/questions/35244333/in-general-does-redirecting-outputs-to-dev-null-enhance-performance
-- https://askubuntu.com/questions/350208/what-does-2-dev-null-mean
+### Run Benchmarks
+```bash
+# Python benchmark
+python benchmark.py --test all
+
+# Node.js benchmark (requires Node.js)
+node benchmark.js --test all
+```
+
+## 🔌 API Reference
+
+### Connect Client
+```bash
+curl -X POST http://localhost:7860/clients/connect \
+  -H "Content-Type: application/json" \
+  -d '{"apiKey": "BROKER_APIKEY", "clientId": "my-client"}'
+```
+
+### Subscribe to Topic
+```bash
+curl -X POST http://localhost:7860/clients/{client_id}/subscribe \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "arena-ai/{session_id}/response", "qos": 0}'
+```
+
+### Publish Message
+```bash
+curl -X POST http://localhost:7860/clients/{client_id}/publish \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "arena-ai/{session_id}/request", "payload": "Hello", "qos": 0}'
+```
+
+### Receive Messages (SSE)
+```bash
+curl -X POST http://localhost:7860/clients/{client_id}/messages \
+  -H "Accept: text/event-stream"
+```
+
+### Receive Messages (NDJSON)
+```bash
+curl -X POST http://localhost:7860/clients/{client_id}/messages/stream \
+  -H "Accept: application/x-ndjson"
+```
+
+### WebSocket (MQTT Proxy)
+```javascript
+const mqtt = require('mqtt');
+const client = mqtt.connect('ws://localhost:7860/ws', {
+  clientId: 'my-client',
+  protocolVersion: 4,
+  path: '/ws'
+});
+client.on('connect', () => {
+  client.subscribe('topic/#');
+});
+client.on('message', (topic, msg) => {
+  console.log(msg.toString());
+});
+```
+
+### WebSocket (HTTP API Client)
+```javascript
+const WebSocket = require('ws');
+const ws = new WebSocket('ws://localhost:7860/ws/{client_id}');
+ws.onopen = () => console.log('Connected');
+ws.onmessage = (event) => {
+  const messages = JSON.parse(event.data);
+  console.log(messages);
+};
+```
+
+## 🏗 Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Clients                                 │
+│   (Browser, IoT Devices, External Services)                 │
+└─────────────────────┬─────────────────────────────────────┘
+                      │
+         ┌────────────┼────────────┐
+         │            │            │
+         ▼            ▼            ▼
+    ┌─────────┐  ┌─────────┐  ┌─────────┐
+    │   HTTP  │  │  MQTT   │  │WebSocket│
+    │   API   │  │  (TCP)  │  │  Proxy  │
+    └────┬────┘  └────┬────┘  └────┬────┘
+         │            │            │
+         └────────────┼────────────┘
+                      │
+         ┌────────────▼────────────┐
+         │     broker_app.py        │
+         │   (FastAPI + uvloop)    │
+         │                         │
+         │  ┌─────────────────┐    │
+         │  │ TopicMultiplexer│    │
+         │  │ (Message Fan-out)│    │
+         │  └────────┬────────┘    │
+         │           │             │
+         └───────────┼─────────────┘
+                     │
+         ┌───────────▼───────────┐
+         │      iotcore          │
+         │   (Rust MQTT Broker)   │
+         └───────────────────────┘
+```
+
+## ⚙️ Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BROKER_HOST` | 127.0.0.1 | MQTT broker host |
+| `BROKER_PORT` | 1883 | MQTT broker port |
+| `BROKER_APIKEY` | BROKER_APIKEY | API authentication |
+| `MAX_QUEUED` | 1000 | Max messages per topic buffer |
+| `MSG_TTL` | 300 | Message TTL in seconds |
+| `STALE_SECONDS` | 300 | Client stale timeout |
+| `BROKER_LOG_LEVEL` | WARNING | Logging level |
+
+## 🌐 Cloudflare/HuggingFace Deployment
+
+### Performance Tips
+1. **Use NDJSON Stream** (`POST /clients/{id}/messages/stream`) - lower overhead than SSE
+2. **Enable GZip** - auto-enabled for responses >256 bytes
+3. **Use batch publish** - `POST /clients/{id}/publish/batch` for bulk sends
+4. **Use fire-and-forget** - `POST /clients/{id}/publish/fire` for fastest publish
+5. **Use WebSocket MQTT** - Direct MQTT over WebSocket bypasses HTTP overhead
+
+### Known Limitations
+- MQTT requires direct TCP access (port 1883) - not available over Cloudflare
+- Use WebSocket/MQTT or HTTP API over cloudflared tunnel
+- Cloudflare QUIC adds ~40ms latency
+
+## 📁 Project Structure
+
+```
+mqtt-broker/
+├── broker_app.py       # Main MQTT broker/HTTP bridge
+├── api_server.py       # OpenAI-compatible MQTT proxy
+├── benchmark.py        # Python performance test suite
+├── benchmark.js        # Node.js performance test suite
+├── run_broker.py      # Broker startup script
+├── pyx/               # Cython extension modules
+├── requirements.txt   # Python dependencies
+└── package.json      # Node.js dependencies
+```
+
+## 📜 License
+
+MIT

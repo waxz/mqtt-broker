@@ -14,9 +14,7 @@ import hashlib
 import uuid
 import struct
 import statistics
-import traceback
 import base64
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 
@@ -237,7 +235,7 @@ class MqttHelper:
         self.client.loop_stop()
         self.client.disconnect()
 
-    def wait_for(self, count, timeout=30):
+    def wait_for(self, count, timeout=30.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
@@ -291,10 +289,11 @@ class HttpHelper:
 
     def _start_sse_listener(self):
         self._sse_stop.clear()
+        cid = self.client_id or "unknown"
         self._sse_thread = threading.Thread(
             target=self._sse_loop,
             daemon=True,
-            name=f"sse-{self.client_id[:8]}",
+            name=f"sse-{cid[:8]}",
         )
         self._sse_thread.start()
 
@@ -322,7 +321,7 @@ class HttpHelper:
                                     else:
                                         self._buffer.append(data)
                                     self._buffer_ready.set()
-                            except:
+                            except (json.JSONDecodeError, TypeError):
                                 pass
             except Exception:
                 if self._sse_stop.is_set():
@@ -501,7 +500,13 @@ def test_latency(avail):
                 h.client.on_message = lambda c,u,m: ev.set()
                 h.publish("lat/mqtt", b"x", qos=qos)
                 if ev.wait(timeout=2.0): lats.append((time.perf_counter() - t0)*1000)
-            if lats: log_metric(f"[MQTT] QoS {qos}: Avg {statistics.mean(lats):.2f}ms, P95 {statistics.quantiles(lats, n=20)[18]:.2f}ms")
+            if len(lats) >= 20:
+                p95 = statistics.quantiles(lats, n=20)[18]
+            elif lats:
+                p95 = sorted(lats)[int(len(lats) * 0.95)]
+            else:
+                p95 = 0
+            if lats: log_metric(f"[MQTT] QoS {qos}: Avg {statistics.mean(lats):.2f}ms, P95 {p95:.2f}ms")
             h.disconnect()
         if "http" in avail:
             h = HttpHelper(); h.connect(); h.subscribe("lat/http", qos); time.sleep(0.2)
@@ -512,7 +517,13 @@ def test_latency(avail):
                     if h.poll("lat/http", limit=1):
                         lats.append((time.perf_counter() - t0)*1000); break
                     time.sleep(0.001)
-            if lats: log_metric(f"[HTTP] QoS {qos}: Avg {statistics.mean(lats):.2f}ms, P95 {statistics.quantiles(lats, n=20)[18]:.2f}ms")
+            if len(lats) >= 20:
+                p95 = statistics.quantiles(lats, n=20)[18]
+            elif lats:
+                p95 = sorted(lats)[int(len(lats) * 0.95)]
+            else:
+                p95 = 0
+            if lats: log_metric(f"[HTTP] QoS {qos}: Avg {statistics.mean(lats):.2f}ms, P95 {p95:.2f}ms")
             h.disconnect()
 
 def test_ordering(avail):

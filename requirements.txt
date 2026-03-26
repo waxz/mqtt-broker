@@ -1,4 +1,5 @@
 fastapi
+slowapi
 uvicorn
 uvloop
 websockets
@@ -12,9 +13,7 @@ jinja2
 PersistDict
 python-multipart
 python-jose[cryptography]
-# passlib
 sqlalchemy
-# opencv-python
 paho-mqtt
 cython
 setuptools
@@ -22,9 +21,8 @@ setuptools
 sqlitedict
 concurrent_collections
 
-# mqtt
+./iotcore-3.0.4-cp312-cp312-manylinux_2_38_x86_64.whl
 # iotcore
-# for pyo3
 maturin
 orjson
 sse-starlette
