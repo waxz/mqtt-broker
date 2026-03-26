@@ -6,7 +6,7 @@ colorTo: blue
 sdk: docker
 pinned: false
 license: mit
-short_description: A high-concurrency, low-latency MQTT-HTTP bridge with WebSocket support.
+short_description: A high-concurrency, low-latency MQTT-HTTP bridge
 ---
 
 # High-Performance MQTT HTTP Bridge
